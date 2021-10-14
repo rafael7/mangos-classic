@@ -4950,7 +4950,7 @@ bool Player::UpdateSkill(uint16 id, uint16 diff)
         return false;
 
     SkillStatusData& skillStatus = itr->second;
-    if (skillStatus.uState == SKILL_DELETED)
+    if (skillStatus.uState == SKILL_DELETED || skillStatus.uState == SKILL_PLACEHOLDER)
         return false;
 
     uint32 valueIndex = PLAYER_SKILL_VALUE_INDEX(skillStatus.pos);
@@ -5075,7 +5075,7 @@ bool Player::UpdateSkillPro(uint16 SkillId, int32 Chance, uint16 diff)
         return false;
 
     SkillStatusData& skillStatus = itr->second;
-    if (skillStatus.uState == SKILL_DELETED)
+    if (skillStatus.uState == SKILL_DELETED || skillStatus.uState == SKILL_PLACEHOLDER)
         return false;
 
     uint32 valueIndex = PLAYER_SKILL_VALUE_INDEX(skillStatus.pos);
@@ -5195,13 +5195,35 @@ SkillRaceClassInfoEntry const* Player::GetSkillInfo(uint16 id, std::function<boo
     return nullptr;
 }
 
+// These skills are needed by the client for proper prerequisite calculation.
+// If the skill is not present at the client, the client ignores the skill requirement
+// and shows the spells as trainable when prerequisites are re-calculated locally
+// (ie. after training another spell, receiving money, etc.) Since the skills are set
+// at zero they are hidden by the client GUI.
+const std::array<uint32, 13> Player::m_placeholderSkills {
+        SKILL_POISONS,
+        SKILL_FIRST_AID,
+        SKILL_BLACKSMITHING,
+        SKILL_LEATHERWORKING,
+        SKILL_ALCHEMY,
+        SKILL_HERBALISM,
+        SKILL_COOKING,
+        SKILL_MINING,
+        SKILL_TAILORING,
+        SKILL_ENGINEERING,
+        SKILL_ENCHANTING,
+        SKILL_FISHING,
+        SKILL_SKINNING
+};
+
 bool Player::HasSkill(uint16 id) const
 {
     if (!id)
         return false;
 
     SkillStatusMap::const_iterator itr = mSkillStatus.find(id);
-    return (itr != mSkillStatus.end() && itr->second.uState != SKILL_DELETED);
+    return (itr != mSkillStatus.end() && itr->second.uState != SKILL_DELETED &&
+            itr->second.uState != SKILL_PLACEHOLDER);
 }
 
 // This functions sets a skill line value (and adds if doesn't exist yet)
@@ -5214,7 +5236,7 @@ void Player::SetSkill(SkillStatusMap::iterator itr, uint16 value, uint16 max, ui
     const uint16 id = uint16(itr->first);
     SkillStatusData& status = itr->second;
 
-    if (status.uState == SKILL_DELETED)
+    if (status.uState == SKILL_DELETED || status.uState == SKILL_PLACEHOLDER)
         return;
 
     if (value)  // Update
@@ -5229,12 +5251,19 @@ void Player::SetSkill(SkillStatusMap::iterator itr, uint16 value, uint16 max, ui
     }
     else        // Remove
     {
-        SetUInt32Value(PLAYER_SKILL_INDEX(status.pos), 0);
+        // check for placeholders skills, set value to zero but keep around
+        bool isPlaceholder = IsPlaceholderSkill(id);
+        SetUInt32Value(PLAYER_SKILL_INDEX(status.pos), isPlaceholder ? MAKE_PAIR32(id, 0) : 0);
         SetUInt32Value(PLAYER_SKILL_VALUE_INDEX(status.pos), 0);
         SetUInt32Value(PLAYER_SKILL_BONUS_INDEX(status.pos), 0);
 
         if (status.uState == SKILL_NEW)
-            mSkillStatus.erase(itr);
+        {
+            if (isPlaceholder)
+                status.uState = SKILL_PLACEHOLDER;
+            else
+                mSkillStatus.erase(itr);
+        }
         else
             status.uState = SKILL_DELETED;
     }
@@ -5256,10 +5285,11 @@ void Player::SetSkill(uint16 id, uint16 value, uint16 max, uint16 step/* = 0*/)
 
     auto itr = mSkillStatus.find(id);
     const bool exists = (itr != mSkillStatus.end());
+    const bool placeholderSkill = IsPlaceholderSkill(id);
 
-    if (exists && itr->second.uState != SKILL_DELETED)  // Update/remove existing
+    if (exists && itr->second.uState != SKILL_DELETED && itr->second.uState != SKILL_PLACEHOLDER)  // Update/remove existing
         SetSkill(itr, value, max, step);
-    else if (value)                                     // Add new
+    else if (value || (placeholderSkill && !exists)) // Add new
     {
         if (!exists)
         {
@@ -5271,38 +5301,50 @@ void Player::SetSkill(uint16 id, uint16 value, uint16 max, uint16 step/* = 0*/)
             }
         }
 
-        for (uint8 pos = 0; pos < PLAYER_MAX_SKILLS; ++pos)
+        uint8 pos = 0;
+        if (exists && placeholderSkill)
+            pos = itr->second.pos; // reuse current placeholder position
+        else
         {
-            if (GetUInt32Value(PLAYER_SKILL_INDEX(pos)))
-                continue;
-
-            if (exists) // Re-use and move data for old status entry if not deleted yet
+            for (; pos < PLAYER_MAX_SKILLS && GetUInt32Value(PLAYER_SKILL_INDEX(pos)); ++pos)
+                    ;
+            if (pos == PLAYER_MAX_SKILLS) // too many skills
             {
-                itr->second.pos = pos;
-                itr->second.uState = SKILL_CHANGED;
+                sLog.outError("Character %u has more than %u skills.", GetGUIDLow(), PLAYER_MAX_SKILLS);
+                return;
             }
-            else        // Add a completely new status entry
+        }
+
+        if (exists) // Re-use and move data for old status entry if not deleted yet
+        {
+            itr->second.pos = pos;
+            itr->second.uState = itr->second.uState == SKILL_PLACEHOLDER ? SKILL_NEW : SKILL_CHANGED;
+        }
+        else        // Add a completely new status entry
+        {
+            SkillUpdateState newStatus = value == 0 ? SKILL_PLACEHOLDER : SKILL_NEW;
+            auto result = mSkillStatus.insert(SkillStatusMap::value_type(id, SkillStatusData(pos, newStatus)));
+
+            if (!result.second) // Insert failed
+                return;
+
+            itr = result.first;
+        }
+
+        SetUInt32Value(PLAYER_SKILL_INDEX(pos), MAKE_PAIR32(id, step));         // Set/reset skill id and step
+        SetSkill(itr, value, max);                                              // Set current and max values
+        SetUInt32Value(PLAYER_SKILL_BONUS_INDEX(pos), 0);                       // Reset bonus data
+
+        if (itr->second.uState == SKILL_PLACEHOLDER)
+            return;
+
+        for (auto type : { SPELL_AURA_MOD_SKILL, SPELL_AURA_MOD_SKILL_TALENT }) // Set temporary, permanent bonuses
+        {
+            for (auto aura : GetAurasByType(type))
             {
-                auto result = mSkillStatus.insert(SkillStatusMap::value_type(id, SkillStatusData(pos, SKILL_NEW)));
-
-                if (!result.second) // Insert failed
-                    return;
-
-                itr = result.first;
+                if (aura->GetModifier()->m_miscvalue == int32(id))
+                    aura->ApplyModifier(true);
             }
-
-            SetUInt32Value(PLAYER_SKILL_INDEX(pos), MAKE_PAIR32(id, step));         // Set/reset skill id and step
-            SetSkill(itr, value, max);                                              // Set current and max values
-            SetUInt32Value(PLAYER_SKILL_BONUS_INDEX(pos), 0);                       // Reset bonus data
-            for (auto type : { SPELL_AURA_MOD_SKILL, SPELL_AURA_MOD_SKILL_TALENT }) // Set temporary, permanent bonuses
-            {
-                for (auto aura : GetAurasByType(type))
-                {
-                    if (aura->GetModifier()->m_miscvalue == int32(id))
-                        aura->ApplyModifier(true);
-                }
-            }
-            break;
         }
     }
 }
@@ -5313,7 +5355,7 @@ uint16 Player::GetSkill(uint16 id, bool bonusPerm, bool bonusTemp, bool max/* = 
         return 0;
 
     SkillStatusMap::const_iterator itr = mSkillStatus.find(id);
-    if (itr == mSkillStatus.end() || itr->second.uState == SKILL_DELETED)
+    if (itr == mSkillStatus.end() || itr->second.uState == SKILL_DELETED || itr->second.uState == SKILL_PLACEHOLDER)
         return 0;
 
     SkillStatusData const& skillStatus = itr->second;
@@ -5384,7 +5426,7 @@ uint16 Player::GetSkillStep(uint16 id) const
         return 0;
 
     SkillStatusMap::const_iterator itr = mSkillStatus.find(id);
-    if (itr == mSkillStatus.end() || itr->second.uState == SKILL_DELETED)
+    if (itr == mSkillStatus.end() || itr->second.uState == SKILL_DELETED || itr->second.uState == SKILL_PLACEHOLDER)
         return 0;
 
     SkillStatusData const& skillStatus = itr->second;
@@ -5398,7 +5440,7 @@ bool Player::ModifySkillBonus(uint16 id, int16 diff, bool permanent/* = false*/)
         return false;
 
     SkillStatusMap::const_iterator itr = mSkillStatus.find(id);
-    if (itr == mSkillStatus.end() || itr->second.uState == SKILL_DELETED)
+    if (itr == mSkillStatus.end() || itr->second.uState == SKILL_DELETED || itr->second.uState == SKILL_PLACEHOLDER)
         return false;
 
     uint16 bonusIndex = PLAYER_SKILL_BONUS_INDEX(itr->second.pos);
@@ -5426,7 +5468,7 @@ int16 Player::GetSkillBonus(uint16 id, bool permanent/*= false*/) const
         return 0;
 
     SkillStatusMap::const_iterator itr = mSkillStatus.find(id);
-    if (itr == mSkillStatus.end() || itr->second.uState == SKILL_DELETED)
+    if (itr == mSkillStatus.end() || itr->second.uState == SKILL_DELETED || itr->second.uState == SKILL_PLACEHOLDER)
         return 0;
 
     SkillStatusData const& skillStatus = itr->second;
@@ -5448,7 +5490,7 @@ void Player::UpdateSkillsForLevel(bool maximize/* = false*/)
     for (auto& pair : mSkillStatus)
     {
         SkillStatusData& skillStatus = pair.second;
-        if (skillStatus.uState == SKILL_DELETED)
+        if (skillStatus.uState == SKILL_DELETED || skillStatus.uState == SKILL_PLACEHOLDER)
             continue;
 
         uint16 skillId = uint16(pair.first);
@@ -5497,7 +5539,7 @@ void Player::UpdateSkillTrainedSpells(uint16 id, uint16 currVal)
             // Update training: skill removal mode, wipe all dependent spells regardless of training method
             if (!currVal)
             {
-                removeSpell(pAbility->spellId, false, false, false);
+                removeSpell(pAbility->spellId, false, false, true);
                 continue;
             }
 
@@ -5697,6 +5739,16 @@ void Player::LearnDefaultSkills()
             }
         }
         SetSkill(tskill.SkillId, value, max, step);
+    }
+
+    // add placeholder zero-rank skills
+    for (auto id : m_placeholderSkills)
+    {
+        if (HasSkill(id))
+            continue;
+        if (id == SKILL_LOCKPICKING && getClass() != CLASS_ROGUE)
+            continue;
+        SetSkill(id, 0, 0, 0);
     }
 }
 
@@ -15876,7 +15928,7 @@ void Player::_SaveSkills()
     // we don't need transactions here.
     for (SkillStatusMap::iterator itr = mSkillStatus.begin(); itr != mSkillStatus.end();)
     {
-        if (itr->second.uState == SKILL_UNCHANGED)
+        if (itr->second.uState == SKILL_UNCHANGED || itr->second.uState == SKILL_PLACEHOLDER)
         {
             ++itr;
             continue;
@@ -15886,7 +15938,11 @@ void Player::_SaveSkills()
         {
             SqlStatement stmt = CharacterDatabase.CreateStatement(delSkills, "DELETE FROM character_skills WHERE guid = ? AND skill = ?");
             stmt.PExecute(GetGUIDLow(), itr->first);
-            mSkillStatus.erase(itr++);
+            // check for placeholder skills
+            if (IsPlaceholderSkill(itr->first))
+                itr->second.uState = SKILL_PLACEHOLDER;
+            else
+                mSkillStatus.erase(itr++);
             continue;
         }
 
@@ -15910,6 +15966,7 @@ void Player::_SaveSkills()
             break;
             case SKILL_UNCHANGED:
             case SKILL_DELETED:
+            case SKILL_PLACEHOLDER:
                 MANGOS_ASSERT(false);
                 break;
         }

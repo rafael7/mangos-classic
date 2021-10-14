@@ -97,11 +97,11 @@ void WorldSession::HandleTrainerListOpcode(WorldPacket& recv_data)
 }
 
 
-static void SendTrainerSpellHelper(WorldPacket& data, TrainerSpell const* tSpell, uint32 triggerSpell, TrainerSpellState state, float fDiscountMod, bool can_learn_primary_prof, uint32 reqLevel)
+static void SendTrainerSpellHelper(WorldPacket& data, TrainerSpell const* tSpell, TrainerSpellState state, float fDiscountMod, bool can_learn_primary_prof, uint32 reqLevel)
 {
-    bool primary_prof_first_rank = sSpellMgr.IsPrimaryProfessionFirstRankSpell(triggerSpell);
+    bool primary_prof_first_rank = sSpellMgr.IsPrimaryProfessionFirstRankSpell(tSpell->learnedSpell);
 
-    SpellChainNode const* chain_node = sSpellMgr.GetSpellChainNode(triggerSpell);
+    SpellChainNode const* chain_node = sSpellMgr.GetSpellChainNode(tSpell->learnedSpell);
 
     data << uint32(tSpell->spell);                      // learned spell (or cast-spell in profession case)
     data << uint8(state == TRAINER_SPELL_GREEN_DISABLED ? TRAINER_SPELL_GREEN : state);
@@ -112,8 +112,8 @@ static void SendTrainerSpellHelper(WorldPacket& data, TrainerSpell const* tSpell
     data << uint8(reqLevel);
     data << uint32(tSpell->reqSkill);
     data << uint32(tSpell->reqSkillValue);
-    data << uint32(!tSpell->IsCastable() && chain_node ? (chain_node->prev ? chain_node->prev : chain_node->req) : 0);
-    data << uint32(!tSpell->IsCastable() && chain_node && chain_node->prev ? chain_node->req : 0);
+    data << uint32(chain_node ? (chain_node->prev ? chain_node->prev : chain_node->req) : 0);
+    data << uint32(chain_node && chain_node->prev ? chain_node->req : 0);
     data << uint32(0);
 }
 
@@ -177,8 +177,6 @@ void WorldSession::SendTrainerList(ObjectGuid guid) const
         {
             TrainerSpell const* tSpell = &itr.second;
 
-            uint32 triggerSpell = sSpellTemplate.LookupEntry<SpellEntry>(tSpell->spell)->EffectTriggerSpell[0];
-
             uint32 reqLevel = 0;
             if (!_player->IsSpellFitByClassAndRace(tSpell->learnedSpell, &reqLevel))
                 continue;
@@ -190,7 +188,7 @@ void WorldSession::SendTrainerList(ObjectGuid guid) const
 
             TrainerSpellState state = _player->GetTrainerSpellState(tSpell, reqLevel);
 
-            SendTrainerSpellHelper(data, tSpell, triggerSpell, state, fDiscountMod, can_learn_primary_prof, reqLevel);
+            SendTrainerSpellHelper(data, tSpell, state, fDiscountMod, can_learn_primary_prof, reqLevel);
 
             ++count;
         }
@@ -202,8 +200,6 @@ void WorldSession::SendTrainerList(ObjectGuid guid) const
         {
             TrainerSpell const* tSpell = &itr.second;
 
-            uint32 triggerSpell = sSpellTemplate.LookupEntry<SpellEntry>(tSpell->spell)->EffectTriggerSpell[0];
-
             uint32 reqLevel = 0;
             if (!_player->IsSpellFitByClassAndRace(tSpell->learnedSpell, &reqLevel))
                 continue;
@@ -215,7 +211,7 @@ void WorldSession::SendTrainerList(ObjectGuid guid) const
 
             TrainerSpellState state = _player->GetTrainerSpellState(tSpell, reqLevel);
 
-            SendTrainerSpellHelper(data, tSpell, triggerSpell, state, fDiscountMod, can_learn_primary_prof, reqLevel);
+            SendTrainerSpellHelper(data, tSpell, state, fDiscountMod, can_learn_primary_prof, reqLevel);
 
             ++count;
         }

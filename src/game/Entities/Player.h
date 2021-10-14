@@ -522,7 +522,8 @@ enum SkillUpdateState
     SKILL_UNCHANGED             = 0,
     SKILL_CHANGED               = 1,
     SKILL_NEW                   = 2,
-    SKILL_DELETED               = 3
+    SKILL_DELETED               = 3,
+    SKILL_PLACEHOLDER           = 4
 };
 
 struct SkillStatusData
@@ -2432,6 +2433,11 @@ class Player : public Unit
                 m_DelayedOperations |= operation;
         }
 
+        bool IsPlaceholderSkill(uint32 id)
+        {
+            return std::find(m_placeholderSkills.begin(), m_placeholderSkills.end(), id) != m_placeholderSkills.end();
+        }
+
         Taxi::Tracker m_taxiTracker;
 
         Unit* m_mover;
@@ -2497,6 +2503,8 @@ class Player : public Unit
 
         std::unordered_map<uint32, TimePoint> m_enteredInstances;
         uint32 m_createdInstanceClearTimer;
+
+        static const std::array<uint32, 13> m_placeholderSkills;
 };
 
 void AddItemsSetItem(Player* player, Item* item);
